@@ -23,10 +23,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
 )
+
+// Global mutex to ensure serialized API requests
+var langsmithAPILock sync.Mutex
 
 // Langsmith func interface
 type Langsmith interface {
@@ -94,6 +98,9 @@ func NewLangsmith(apiKey, apiUrl string) Langsmith {
 
 // CreateRun create run
 func (c *langsmithClient) CreateRun(ctx context.Context, run *Run) error {
+	langsmithAPILock.Lock()
+	defer langsmithAPILock.Unlock()
+
 	jsonData, err := sonic.Marshal(run)
 	if err != nil {
 		return fmt.Errorf("failed to marshal run data: %w", err)
@@ -132,6 +139,9 @@ func (c *langsmithClient) CreateRun(ctx context.Context, run *Run) error {
 
 // UpdateRun update run when it is finished or failed, patch output or error msg.
 func (c *langsmithClient) UpdateRun(ctx context.Context, runID string, patch *RunPatch) error {
+	langsmithAPILock.Lock()
+	defer langsmithAPILock.Unlock()
+
 	jsonData, err := json.Marshal(patch)
 	if err != nil {
 		return fmt.Errorf("failed to marshal patch data: %w", err)

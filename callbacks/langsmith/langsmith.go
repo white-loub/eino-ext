@@ -27,6 +27,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
@@ -158,6 +159,20 @@ func (c *CallbackHandler) OnEnd(ctx context.Context, info *callbacks.RunInfo, ou
 		log.Printf("[langsmith] no state in context on OnEnd, runinfo: %+v", info)
 		return ctx
 	}
+
+	// Extract token usage from model output
+	var metaData = SafeDeepCopySyncMapMetadata(state.Metadata)
+	if modelOutput, ok := output.(*model.CallbackOutput); ok && modelOutput.TokenUsage != nil {
+		var tmp = metaData["metadata"].(map[string]interface{})
+		var langsmithUsage = map[string]int{
+			"input_tokens":  modelOutput.TokenUsage.PromptTokens,
+			"output_tokens": modelOutput.TokenUsage.CompletionTokens,
+			"total_tokens":  modelOutput.TokenUsage.TotalTokens,
+		}
+		tmp["usage_metadata"] = langsmithUsage
+		metaData["metadata"] = tmp
+	}
+
 	out, err := sonic.MarshalString(output)
 	if err != nil {
 		log.Printf("marshal output error: %v, runinfo: %+v", err, info)
@@ -168,6 +183,7 @@ func (c *CallbackHandler) OnEnd(ctx context.Context, info *callbacks.RunInfo, ou
 	patch := &RunPatch{
 		EndTime: &endTime,
 		Outputs: map[string]interface{}{"output": out},
+		Extra:   metaData,
 	}
 
 	err = c.cli.UpdateRun(ctx, state.ParentRunID, patch)
