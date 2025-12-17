@@ -27,6 +27,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
@@ -264,6 +265,7 @@ func (c *CallbackHandler) OnStartWithStreamInput(ctx context.Context, info *call
 			input.Close()
 		}()
 
+		// Collect all stream input chunks
 		var inputs []callbacks.CallbackInput
 		for {
 			chunk, err := input.Recv()
@@ -276,24 +278,42 @@ func (c *CallbackHandler) OnStartWithStreamInput(ctx context.Context, info *call
 			}
 			inputs = append(inputs, chunk)
 		}
-		modelConf, inMessage, extra, err_ := extractModelInput(convModelCallbackInput(inputs))
-		if err_ != nil {
-			log.Printf("extract stream model input error: %v, runinfo: %+v", err_, info)
-			return
-		}
 
-		if extra != nil {
-			for k, v := range extra {
-				metaData[k] = v
+		// Process input based on component type
+		var inputData interface{}
+
+		if info.Component == components.ComponentOfChatModel {
+			// ChatModel: extract messages and config
+			convertedInputs := convModelCallbackInput(inputs)
+			modelConf, inMessage, extra, err_ := extractModelInput(convertedInputs)
+			if err_ != nil {
+				log.Printf("[langsmith] extract stream model input error: %v, runinfo: %+v", err_, info)
+				return
 			}
-		}
-		if modelConf != nil {
-			var tmp = metaData["metadata"].(map[string]interface{})
-			tmp["ls_model_name"] = modelConf.Model
-			tmp["ls_max_tokens"] = modelConf.MaxTokens
-			tmp["model_conf"] = modelConf
-			metaData["metadata"] = tmp
-			newSyncMap.Store("metadata", tmp)
+
+			// Update metadata with model config
+			if extra != nil {
+				for k, v := range extra {
+					metaData[k] = v
+				}
+			}
+			if modelConf != nil {
+				var tmp = metaData["metadata"].(map[string]interface{})
+				tmp["ls_model_name"] = modelConf.Model
+				tmp["ls_max_tokens"] = modelConf.MaxTokens
+				tmp["model_conf"] = modelConf
+				metaData["metadata"] = tmp
+				newSyncMap.Store("metadata", tmp)
+			}
+
+			inputData = inMessage
+		} else {
+			// Non-ChatModel (Graph/Lambda/Tool): use raw input directly
+			if len(inputs) == 1 {
+				inputData = inputs[0]
+			} else {
+				inputData = inputs
+			}
 		}
 
 		if opts.ReferenceExampleID != "" {
@@ -303,7 +323,7 @@ func (c *CallbackHandler) OnStartWithStreamInput(ctx context.Context, info *call
 			run.ParentRunID = &state.ParentRunID
 		}
 
-		run.Inputs = map[string]interface{}{"stream_inputs": inMessage}
+		run.Inputs = map[string]interface{}{"input": inputData}
 		run.Extra = metaData
 		err := c.cli.CreateRun(ctx, run)
 		if err != nil {
