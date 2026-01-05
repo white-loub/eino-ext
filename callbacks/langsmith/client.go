@@ -29,9 +29,6 @@ import (
 	"github.com/bytedance/sonic"
 )
 
-// Global mutex to ensure serialized API requests
-var langsmithAPILock sync.Mutex
-
 // Langsmith func interface
 type Langsmith interface {
 	CreateRun(ctx context.Context, run *Run) error
@@ -82,6 +79,15 @@ type langsmithClient struct {
 	apiKey     string
 	baseURL    string
 	httpClient *http.Client
+	traceLocks sync.Map // map[traceID]*sync.Mutex, per-trace locks for CreateRun
+}
+
+// getTraceLock returns a mutex for the given traceID.
+// This ensures CreateRun calls within the same trace are serialized
+// to prevent DottedOrder timestamp conflicts.
+func (c *langsmithClient) getTraceLock(traceID string) *sync.Mutex {
+	lock, _ := c.traceLocks.LoadOrStore(traceID, &sync.Mutex{})
+	return lock.(*sync.Mutex)
 }
 
 // NewLangsmith create langsmith client
@@ -98,8 +104,10 @@ func NewLangsmith(apiKey, apiUrl string) Langsmith {
 
 // CreateRun create run
 func (c *langsmithClient) CreateRun(ctx context.Context, run *Run) error {
-	langsmithAPILock.Lock()
-	defer langsmithAPILock.Unlock()
+	// Lock by TraceID to prevent timestamp conflicts within the same trace
+	lock := c.getTraceLock(run.TraceID)
+	lock.Lock()
+	defer lock.Unlock()
 
 	jsonData, err := sonic.Marshal(run)
 	if err != nil {
@@ -139,9 +147,6 @@ func (c *langsmithClient) CreateRun(ctx context.Context, run *Run) error {
 
 // UpdateRun update run when it is finished or failed, patch output or error msg.
 func (c *langsmithClient) UpdateRun(ctx context.Context, runID string, patch *RunPatch) error {
-	langsmithAPILock.Lock()
-	defer langsmithAPILock.Unlock()
-
 	jsonData, err := json.Marshal(patch)
 	if err != nil {
 		return fmt.Errorf("failed to marshal patch data: %w", err)
