@@ -33,6 +33,35 @@ import (
 	"github.com/google/uuid"
 )
 
+// MonotonicTimestampGen ensures each generated timestamp is unique and monotonically increasing.
+// This prevents dotted_order collisions when multiple runs are created concurrently.
+type MonotonicTimestampGen struct {
+	mu       sync.Mutex
+	lastTime int64 // Last generated timestamp in microseconds
+}
+
+// Now returns a unique, monotonically increasing UTC timestamp.
+// If called multiple times within the same microsecond, it increments the timestamp.
+func (g *MonotonicTimestampGen) Now() time.Time {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	now := time.Now().UTC()
+	currentMicro := now.UnixMicro()
+
+	if currentMicro <= g.lastTime {
+		// Force increment to guarantee uniqueness
+		g.lastTime++
+		return time.UnixMicro(g.lastTime).UTC()
+	}
+
+	g.lastTime = currentMicro
+	return now
+}
+
+// Global timestamp generator for all LangSmith runs
+var timestampGen = &MonotonicTimestampGen{}
+
 // Config LangsmithHandler configuration
 type Config struct {
 	APIKey   string                           // langsmith api key
@@ -108,7 +137,7 @@ func (c *CallbackHandler) OnStart(ctx context.Context, info *callbacks.RunInfo, 
 		TraceID:     state.TraceID,
 		Name:        runInfoToName(info),
 		RunType:     runInfoToRunType(info),
-		StartTime:   time.Now().UTC(),
+		StartTime:   timestampGen.Now(),
 		Inputs:      map[string]interface{}{"input": in},
 		SessionName: opts.SessionName,
 		Extra:       metaData,
@@ -180,7 +209,7 @@ func (c *CallbackHandler) OnEnd(ctx context.Context, info *callbacks.RunInfo, ou
 		return ctx
 	}
 
-	endTime := time.Now().UTC()
+	endTime := timestampGen.Now()
 	patch := &RunPatch{
 		EndTime: &endTime,
 		Outputs: map[string]interface{}{"output": out},
@@ -205,7 +234,7 @@ func (c *CallbackHandler) OnError(ctx context.Context, info *callbacks.RunInfo, 
 		return ctx
 	}
 
-	endTime := time.Now().UTC()
+	endTime := timestampGen.Now()
 	errStr := err.Error()
 	patch := &RunPatch{
 		EndTime: &endTime,
@@ -238,7 +267,7 @@ func (c *CallbackHandler) OnStartWithStreamInput(ctx context.Context, info *call
 		TraceID:     state.TraceID,
 		Name:        runInfoToName(info),
 		RunType:     runInfoToRunType(info),
-		StartTime:   time.Now().UTC(),
+		StartTime:   timestampGen.Now(),
 		SessionName: opts.SessionName,
 		Tags:        opts.Tags,
 	}
@@ -394,7 +423,7 @@ func (c *CallbackHandler) OnEndWithStreamOutput(ctx context.Context, info *callb
 			tmp["usage_metadata"] = langsmithUsage
 			metaData["metadata"] = tmp
 		}
-		endTime := time.Now().UTC()
+		endTime := timestampGen.Now()
 		patch := &RunPatch{
 			EndTime: &endTime,
 			Outputs: map[string]interface{}{"stream_outputs": outMessage},

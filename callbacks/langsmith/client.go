@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -79,15 +78,6 @@ type langsmithClient struct {
 	apiKey     string
 	baseURL    string
 	httpClient *http.Client
-	traceLocks sync.Map // map[traceID]*sync.Mutex, per-trace locks for CreateRun
-}
-
-// getTraceLock returns a mutex for the given traceID.
-// This ensures CreateRun calls within the same trace are serialized
-// to prevent DottedOrder timestamp conflicts.
-func (c *langsmithClient) getTraceLock(traceID string) *sync.Mutex {
-	lock, _ := c.traceLocks.LoadOrStore(traceID, &sync.Mutex{})
-	return lock.(*sync.Mutex)
 }
 
 // NewLangsmith create langsmith client
@@ -104,11 +94,6 @@ func NewLangsmith(apiKey, apiUrl string) Langsmith {
 
 // CreateRun create run
 func (c *langsmithClient) CreateRun(ctx context.Context, run *Run) error {
-	// Lock by TraceID to prevent timestamp conflicts within the same trace
-	lock := c.getTraceLock(run.TraceID)
-	lock.Lock()
-	defer lock.Unlock()
-
 	jsonData, err := sonic.Marshal(run)
 	if err != nil {
 		return fmt.Errorf("failed to marshal run data: %w", err)
