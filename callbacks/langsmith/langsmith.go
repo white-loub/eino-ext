@@ -98,6 +98,7 @@ type LangsmithState struct {
 	Metadata          *sync.Map              `json:"metadata"`
 	Tags              []string               `json:"tags"`
 	MarshalMetadata   map[string]interface{} `json:"marshal_metadata"`
+	CreateDone        chan struct{}          `json:"-"` // Signals CreateRun completion
 }
 
 type langsmithStateKey struct{}
@@ -169,12 +170,15 @@ func (c *CallbackHandler) OnStart(ctx context.Context, info *callbacks.RunInfo, 
 	for k, v := range run.Extra {
 		newSyncMap.Store(k, v)
 	}
+	createDone := make(chan struct{})
+	close(createDone) // Create completed synchronously
 	newState := &LangsmithState{
 		TraceID:           run.TraceID,
 		ParentRunID:       runID,
 		ParentDottedOrder: run.DottedOrder,
 		Metadata:          newSyncMap,
 		Tags:              run.Tags,
+		CreateDone:        createDone,
 	}
 	return context.WithValue(ctx, langsmithStateKey{}, newState)
 }
@@ -216,6 +220,17 @@ func (c *CallbackHandler) OnEnd(ctx context.Context, info *callbacks.RunInfo, ou
 		Extra:   metaData,
 	}
 
+	// Wait for CreateRun to complete before UpdateRun (with timeout)
+	if state.CreateDone != nil {
+		select {
+		case <-state.CreateDone:
+			// CreateRun completed, proceed
+		case <-time.After(30 * time.Second):
+			log.Printf("[langsmith] timeout waiting for CreateRun, skipping UpdateRun")
+			return ctx
+		}
+	}
+
 	err = c.cli.UpdateRun(ctx, state.ParentRunID, patch)
 	if err != nil {
 		log.Printf("[langsmith] failed to update run: %v", err)
@@ -239,6 +254,17 @@ func (c *CallbackHandler) OnError(ctx context.Context, info *callbacks.RunInfo, 
 	patch := &RunPatch{
 		EndTime: &endTime,
 		Error:   &errStr,
+	}
+
+	// Wait for CreateRun to complete before UpdateRun (with timeout)
+	if state.CreateDone != nil {
+		select {
+		case <-state.CreateDone:
+			// CreateRun completed, proceed
+		case <-time.After(30 * time.Second):
+			log.Printf("[langsmith] timeout waiting for CreateRun, skipping UpdateRun")
+			return ctx
+		}
 	}
 
 	updateErr := c.cli.UpdateRun(ctx, state.ParentRunID, patch)
@@ -285,6 +311,8 @@ func (c *CallbackHandler) OnStartWithStreamInput(ctx context.Context, info *call
 	for k, v := range metaData {
 		newSyncMap.Store(k, v)
 	}
+	// Create channel for signaling CreateRun completion
+	createDone := make(chan struct{})
 	// start goroutine to handle stream input
 	go func() {
 		defer func() {
@@ -358,6 +386,7 @@ func (c *CallbackHandler) OnStartWithStreamInput(ctx context.Context, info *call
 		if err != nil {
 			log.Printf("[langsmith] failed to create run for stream: %v", err)
 		}
+		close(createDone) // Signal CreateRun completion
 	}()
 
 	newState := &LangsmithState{
@@ -366,6 +395,7 @@ func (c *CallbackHandler) OnStartWithStreamInput(ctx context.Context, info *call
 		ParentDottedOrder: run.DottedOrder,
 		Metadata:          newSyncMap,
 		Tags:              run.Tags,
+		CreateDone:        createDone,
 	}
 	return context.WithValue(ctx, langsmithStateKey{}, newState)
 }
@@ -428,6 +458,17 @@ func (c *CallbackHandler) OnEndWithStreamOutput(ctx context.Context, info *callb
 			EndTime: &endTime,
 			Outputs: map[string]interface{}{"stream_outputs": outMessage},
 			Extra:   metaData,
+		}
+
+		// Wait for CreateRun to complete before UpdateRun (with timeout)
+		if state.CreateDone != nil {
+			select {
+			case <-state.CreateDone:
+				// CreateRun completed, proceed
+			case <-time.After(30 * time.Second):
+				log.Printf("[langsmith] timeout waiting for CreateRun in stream, skipping UpdateRun")
+				return
+			}
 		}
 
 		// 使用后台 context
